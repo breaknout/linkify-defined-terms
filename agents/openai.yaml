@@ -1,0 +1,4 @@
+interface:
+  display_name: "Linkify Defined Terms"
+  short_description: "Preserve DOCX formatting while linking defined terms"
+  default_prompt: "Use $linkify-defined-terms to create a format-preserving DOCX where every defined term use visibly links to its definition."
