@@ -106,16 +106,6 @@ For agents that follow the emerging shared agent-skill convention, use:
 .agents/skills/linkify-defined-terms/
 ```
 
-## Legacy Wrapper Folders
-
-Wrapper folders are also available in [wrappers/](wrappers/) for users who prefer explicit app-labelled packages:
-
-| Environment | Wrapper | Use |
-|---|---|---|
-| Codex | [wrappers/codex](wrappers/codex) | Copy `linkify-defined-terms/` into your Codex skills directory. |
-| Claude Cowork | [wrappers/claude-cowork](wrappers/claude-cowork) | Copy `linkify-defined-terms/` into the skill/tool directory used by Claude Cowork. |
-| Copilot Cowork | [wrappers/copilot-cowork](wrappers/copilot-cowork) | Copy `.github/copilot-instructions.md` and `scripts/` into the repository where Copilot Cowork will run. |
-
 ## Validation
 
 The tool has been tested against 15 smaller public contracts and one large Australian tax legislation compilation. The smaller-contract suite checked:
