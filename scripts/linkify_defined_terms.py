@@ -29,19 +29,27 @@ WORD_CHARS = "A-Za-z0-9_"
 DEFINITION_PATTERNS = [
     re.compile(
         r'\s*(?:\d+(?:\.\d+)*\.?\s*)?(?:\([A-Za-z0-9]+\)\s*)?["“](?P<term>[^"”]{2,120})["”]\s+'
-        r"(?P<verb>means|shall mean|has the meaning|is defined)",
+        r"(?P<verb>means|shall mean|has the meaning|has the same meaning|is defined)",
         re.IGNORECASE,
     ),
     re.compile(
         r"^\s*(?:\d+(?:\.\d+)*\.?\s*)?(?:\([A-Za-z0-9]+\)\s*)?"
-        r"(?P<term>[A-Z][A-Za-z0-9&/,()'-]*(?:\s+[A-Z][A-Za-z0-9&/,()'-]*){0,7})\s+"
-        r"(?P<verb>means|shall mean|has the meaning|is defined)",
-        re.IGNORECASE,
+        r"(?P<term>[A-Z][A-Za-z0-9&/,()'-]*"
+        r"(?:\s+(?:[A-Z][A-Za-z0-9&/,()'-]*|of|and|or|the|a|an|in|to|for|by|with|on|at|from)){0,7})\s+"
+        r"(?P<verb>(?i:means|shall mean|has the meaning|has the same meaning|is defined))",
     ),
 ]
 QUOTED_TERM_ONLY = re.compile(r'^\s*["“](?P<term>[^"”]{2,120})["”]\s*[.:;]?\s*$')
-DEFINITION_CONTINUATION = re.compile(r"^\s*(means|shall mean|has the meaning|is defined)\b", re.IGNORECASE)
+DEFINITION_CONTINUATION = re.compile(r"^\s*(means|shall mean|has the meaning|has the same meaning|is defined)\b", re.IGNORECASE)
 INLINE_ALIAS = re.compile(r"\((?:the\s+)?[\"“](?P<term>[^\"”]{2,120})[\"”]\)", re.IGNORECASE)
+# Unquoted parenthetical inline definitions, e.g. "... (Confidential Information) will ..."
+PAREN_ALIAS_UNQUOTED = re.compile(r"\(\s*(?:the\s+)?(?P<term>[A-Z][^()]{1,79})\)")
+ALIAS_CONNECTORS = {"of", "and", "or", "the", "a", "an", "in", "to", "for", "by", "with", "on", "at", "from"}
+ALIAS_BLACKLIST = {"cth", "nsw", "vic", "qld", "wa", "sa", "tas", "act", "nt", "cwlth", "commonwealth"}
+# Parenthetical is part of a statute/instrument name when followed by Act/Regulations/year, e.g. "(Goods and Services Tax) Act 1999"
+STATUTE_TRAILER = re.compile(r"\s*(?:Act|Regulations?|Rules?|Ordinance|Determination|Bill)\b|\s*\d{4}\b", re.IGNORECASE)
+# Parenthetical is a citation title (ruling/section/clause N (Title)) rather than a definition
+CITATION_LEADER = re.compile(r"(?:ruling|section|clause|item|note|paragraph|schedule)\s*[\w/.-]*\s*$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -71,6 +79,40 @@ def is_plausible_inline_alias(term: str) -> bool:
     if term[:1].isupper():
         return True
     return bool(re.fullmatch(r"[A-Z0-9][A-Z0-9 /&()-]+", term))
+
+
+def is_paren_definition(term: str) -> bool:
+    term = clean_term(term)
+    if len(term) < 2:
+        return False
+    words = term.split()
+    if not (1 <= len(words) <= 6):
+        return False
+    significant = 0
+    for raw in words:
+        word = raw.strip(".,:;")
+        if not word:
+            return False
+        if any(ch.isdigit() for ch in word):
+            return False
+        if word.lower() in ALIAS_CONNECTORS:
+            continue
+        if not word[0].isupper():
+            return False
+        if not re.fullmatch(r"[A-Za-z][A-Za-z&/'-]*", word):
+            return False
+        significant += 1
+    if significant == 0:
+        return False
+    if term.lower() in ALIAS_BLACKLIST:
+        return False
+    # reject short all-caps roman/list-marker style single tokens (e.g. IV, IT)
+    if len(words) == 1 and words[0].isupper() and len(words[0]) < 3:
+        return False
+    # reject all-caps multi-word instruction text (e.g. BLOCK LETTERS)
+    if len(words) > 1 and all(w.strip(".,:;").isupper() for w in words):
+        return False
+    return True
 
 
 def paragraph_text(paragraph: etree._Element) -> str:
@@ -109,6 +151,14 @@ def detect_definitions(paragraphs: Iterable[etree._Element]) -> dict[str, int]:
         for alias in INLINE_ALIAS.finditer(text):
             term = clean_term(alias.group("term"))
             if is_plausible_inline_alias(term) and term not in definitions:
+                definitions[term] = index
+        for alias in PAREN_ALIAS_UNQUOTED.finditer(text):
+            term = clean_term(alias.group("term"))
+            if STATUTE_TRAILER.match(text[alias.end():alias.end() + 16]):
+                continue
+            if CITATION_LEADER.search(text[max(0, alias.start() - 20):alias.start()]):
+                continue
+            if is_paren_definition(term) and term not in definitions:
                 definitions[term] = index
         quoted_term = QUOTED_TERM_ONLY.search(text)
         if quoted_term:
@@ -249,6 +299,28 @@ def add_bookmark(paragraph: etree._Element, name: str, bookmark_id: int) -> None
     paragraph.insert(insert_at + 1, end)
 
 
+def is_definition_span(text: str, match: "re.Match[str]") -> bool:
+    """True if this occurrence of the term is the definition itself (so it must
+    not be linked), rather than an ordinary use that should be linked."""
+    start, end = match.start(), match.end()
+    before = text[max(0, start - 8):start]
+    after = text[end:end + 24]
+    # Quoted definition: "Term" or curly “Term”
+    if before[-1:] in {'"', '“'} and after[:1] in {'"', '”'}:
+        return True
+    # Parenthetical alias: (Term) or (the Term)
+    if after[:1] == ")" and "(" in before:
+        return True
+    # Followed by a defining verb (means / has the meaning / includes / ...)
+    if re.match(
+        r"\s*(?:means|shall mean|has the meaning|has the same meaning|is defined|includes?)\b",
+        after,
+        re.IGNORECASE,
+    ):
+        return True
+    return False
+
+
 def rebuild_paragraph(
     paragraph: etree._Element,
     matches: list[re.Match[str]],
@@ -266,7 +338,7 @@ def rebuild_paragraph(
     link_count = 0
     for match in matches:
         term = match.group(1)
-        if term in defined_here:
+        if term in defined_here and is_definition_span(text, match):
             continue
         append_range(paragraph, segments, cursor, match.start())
         link_count += append_range(paragraph, segments, match.start(), match.end(), anchors[term])
